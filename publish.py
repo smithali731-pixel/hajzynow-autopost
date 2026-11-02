@@ -98,7 +98,8 @@ def main():
             failed = True
             log("ERROR", f"{it['id']}: {ex}")
     if not due:
-        log("INFO", "nothing due")
+        acct = api(os.environ["IG_USER_ID"], {"fields": "username"}, "GET")
+        log("INFO", f"nothing due; token OK for @{acct.get('username')}")
     STATE.write_text(json.dumps(state, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     sys.exit(1 if failed else 0)
 
