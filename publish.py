@@ -42,6 +42,9 @@ def notify(text):
     data = urllib.parse.urlencode({"chat_id": chat, "text": text, "disable_web_page_preview": "true"}).encode()
     try:
         urllib.request.urlopen(f"https://api.telegram.org/bot{token}/sendMessage", data=data, timeout=30).read()
+        log("INFO", "telegram alert sent")
+    except urllib.error.HTTPError as ex:
+        log("WARN", f"telegram alert failed: HTTP {ex.code} {ex.read().decode()[:200]}")
     except Exception as ex:
         log("WARN", f"telegram alert failed: {ex}")
 
@@ -109,6 +112,9 @@ def publish(item):
 
 
 def main():
+    if os.environ.get("TEST_ALERT"):
+        notify("🔔 تجربة تنبيهات حجزي ناو\nإذا وصلتك هذه الرسالة فالتنبيهات تعمل. أي منشور يتأخر أو يفشل سيصلك عنه تنبيه هنا.")
+        return
     now = datetime.now(timezone.utc)
     schedule = json.loads(SCHEDULE.read_text(encoding="utf-8"))
     state = json.loads(STATE.read_text(encoding="utf-8")) if STATE.exists() else {"done": {}, "skipped": {}}

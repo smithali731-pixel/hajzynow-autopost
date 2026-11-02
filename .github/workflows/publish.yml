@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: "7,37 * * * *"
   workflow_dispatch:
+    inputs:
+      test_alert:
+        description: "Send a Telegram test message only (no publishing)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -26,6 +31,7 @@ jobs:
           IG_TOKEN: ${{ secrets.IG_TOKEN }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: "324285499"
+          TEST_ALERT: ${{ inputs.test_alert && '1' || '' }}
         run: python publish.py
       - name: save state
         if: always()
