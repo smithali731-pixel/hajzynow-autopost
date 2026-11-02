@@ -14,6 +14,7 @@ SCHEDULE = ROOT / "schedule.json"
 STATE = ROOT / "state.json"
 GRAPH = "https://graph.facebook.com/v21.0"
 WINDOW_MIN = int(os.environ.get("WINDOW_MIN", "180"))  # GitHub cron can lag; skip anything older than this
+RETRY_WAITS = (60, 180)  # after a failed attempt: retry in 1 minute, then again 3 minutes later
 
 
 def log(level, msg):
@@ -30,6 +31,42 @@ def api(path, params, method="POST"):
             return json.loads(r.read().decode())
     except urllib.error.HTTPError as ex:
         raise RuntimeError(f"{path}: HTTP {ex.code} {ex.read().decode()[:400]}") from None
+
+
+def notify(text):
+    """Send an alert to the owner through the HajzyNow Telegram bot. Never raises."""
+    token, chat = os.environ.get("TG_BOT_TOKEN"), os.environ.get("TG_CHAT_ID")
+    if not token or not chat:
+        log("WARN", "telegram alert skipped: TG_BOT_TOKEN/TG_CHAT_ID not set")
+        return
+    data = urllib.parse.urlencode({"chat_id": chat, "text": text, "disable_web_page_preview": "true"}).encode()
+    try:
+        urllib.request.urlopen(f"https://api.telegram.org/bot{token}/sendMessage", data=data, timeout=30).read()
+    except Exception as ex:
+        log("WARN", f"telegram alert failed: {ex}")
+
+
+def baghdad(at):
+    return datetime.fromisoformat(at).strftime("%d/%m %H:%M")
+
+
+def publish_with_retries(item, sleep=time.sleep):
+    """Publish, retrying after 1 and 3 minutes; alert on every failure and on success after a failure."""
+    attempts = len(RETRY_WAITS) + 1
+    for n in range(1, attempts + 1):
+        try:
+            pid = publish(item)
+            if n > 1:
+                notify(f"✅ تم نشر منشور حجزي ناو بعد المحاولة {n}\n{item['id']} (موعده {baghdad(item['at'])} بغداد)")
+            return pid
+        except Exception as ex:
+            log("ERROR", f"{item['id']} attempt {n}/{attempts}: {ex}")
+            if n == attempts:
+                notify(f"❌ فشل نشر منشور حجزي ناو بعد {attempts} محاولات\n{item['id']} (موعده {baghdad(item['at'])} بغداد)\nالسبب: {str(ex)[:300]}")
+                raise
+            wait = RETRY_WAITS[n - 1]
+            notify(f"⚠️ منشور حجزي ناو لم ينشر في موعده\n{item['id']} (موعده {baghdad(item['at'])} بغداد)\nأعيد المحاولة بعد {wait // 60} دقيقة")
+            sleep(wait)
 
 
 def media_url(name):
@@ -86,12 +123,13 @@ def main():
         if late > WINDOW_MIN:
             state["skipped"][it["id"]] = f"missed by {int(late)} min"
             log("WARN", f"skipped {it['id']}: {int(late)} min late")
+            notify(f"❌ منشور حجزي ناو فات موعده بأكثر من {WINDOW_MIN // 60} ساعات ولم ينشر\n{it['id']} (موعده {baghdad(it['at'])} بغداد)")
             continue
         due.append((at, it))
     failed = False
     for _, it in sorted(due, key=lambda x: x[0]):
         try:
-            pid = publish(it)
+            pid = publish_with_retries(it)
             state["done"][it["id"]] = {"post_id": pid, "at": now.isoformat(timespec="seconds")}
             log("INFO", f"published {it['id']} -> {pid}")
         except Exception as ex:  # keep going so one bad post does not block the rest
