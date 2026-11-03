@@ -13,7 +13,8 @@ ROOT = Path(__file__).resolve().parent
 SCHEDULE = ROOT / "schedule.json"
 STATE = ROOT / "state.json"
 GRAPH = "https://graph.facebook.com/v21.0"
-WINDOW_MIN = int(os.environ.get("WINDOW_MIN", "180"))  # GitHub cron can lag; skip anything older than this
+MIN_GAP_MIN = int(os.environ.get("MIN_GAP_MIN", "40"))  # minimum minutes between two publishes, to space out a backlog
+QUIET_START, QUIET_END = 9, 23  # only publish between 09:00 and 23:00 Baghdad time; late posts wait, never dropped
 RETRY_WAITS = (60, 180)  # after a failed attempt: retry in 1 minute, then again 3 minutes later
 
 
@@ -118,32 +119,53 @@ def main():
     now = datetime.now(timezone.utc)
     schedule = json.loads(SCHEDULE.read_text(encoding="utf-8"))
     state = json.loads(STATE.read_text(encoding="utf-8")) if STATE.exists() else {"done": {}, "skipped": {}}
+    state.setdefault("done", {})
+    state.setdefault("skipped", {})
+
+    # Every post whose time has arrived and that was never published. A missed post is
+    # NEVER dropped: GitHub's cron can lag by hours, so a late post simply publishes on
+    # the first run that reaches it (oldest first), spaced out below.
     due = []
     for it in schedule:
         if it["id"] in state["done"] or it["id"] in state["skipped"]:
             continue
         at = datetime.fromisoformat(it["at"])
-        late = (now - at).total_seconds() / 60
-        if late < 0:
-            continue
-        if late > WINDOW_MIN:
-            state["skipped"][it["id"]] = f"missed by {int(late)} min"
-            log("WARN", f"skipped {it['id']}: {int(late)} min late")
-            notify(f"❌ منشور حجزي ناو فات موعده بأكثر من {WINDOW_MIN // 60} ساعات ولم ينشر\n{it['id']} (موعده {baghdad(it['at'])} بغداد)")
-            continue
-        due.append((at, it))
-    failed = False
-    for _, it in sorted(due, key=lambda x: x[0]):
-        try:
-            pid = publish_with_retries(it)
-            state["done"][it["id"]] = {"post_id": pid, "at": now.isoformat(timespec="seconds")}
-            log("INFO", f"published {it['id']} -> {pid}")
-        except Exception as ex:  # keep going so one bad post does not block the rest
-            failed = True
-            log("ERROR", f"{it['id']}: {ex}")
+        if at <= now:
+            due.append((at, it))
+    due.sort(key=lambda x: x[0])
+
     if not due:
         acct = api(os.environ["IG_USER_ID"], {"fields": "username"}, "GET")
         log("INFO", f"nothing due; token OK for @{acct.get('username')}")
+        STATE.write_text(json.dumps(state, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+        sys.exit(0)
+
+    # Don't post in the dead of night, and never dump a backlog at once: one post per run,
+    # with at least MIN_GAP_MIN minutes between posts. Missed posts wait, they are not lost.
+    bag_hour = (now.hour + 3) % 24  # Baghdad = UTC+3, no daylight saving
+    if not (QUIET_START <= bag_hour < QUIET_END):
+        log("INFO", f"{len(due)} due but outside posting hours (Baghdad {bag_hour:02d}:00); waiting")
+        sys.exit(0)
+    if state["done"]:
+        last = max(datetime.fromisoformat(v["at"]) for v in state["done"].values())
+        gap = (now - last).total_seconds() / 60
+        if gap < MIN_GAP_MIN:
+            log("INFO", f"{len(due)} due but last post was {int(gap)} min ago (< {MIN_GAP_MIN}); spacing out")
+            sys.exit(0)
+
+    at, it = due[0]  # publish only the single oldest due post this run
+    late = int((now - at).total_seconds() / 60)
+    failed = False
+    try:
+        pid = publish_with_retries(it)
+        state["done"][it["id"]] = {"post_id": pid, "at": now.isoformat(timespec="seconds")}
+        log("INFO", f"published {it['id']} -> {pid} ({late} min after schedule)")
+        if late > 90:
+            notify(f"✅ تم نشر منشور حجزي ناو (تأخر {late} دقيقة بسبب جدولة GitHub)\n{it['id']} (موعده {baghdad(it['at'])} بغداد)")
+    except Exception as ex:
+        failed = True
+        log("ERROR", f"{it['id']}: {ex}")
+
     STATE.write_text(json.dumps(state, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     sys.exit(1 if failed else 0)
 
