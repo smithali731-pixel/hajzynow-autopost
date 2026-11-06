@@ -1,0 +1,8 @@
+<!doctype html><meta charset="utf-8"><title>hz sender</title>
+<p id="s">sending…</p>
+<script>
+const f=(new URLSearchParams(location.search).get('f')||'').split(',').filter(Boolean);
+Promise.all(f.map(n=>fetch('media/'+encodeURIComponent(n)).then(r=>{if(!r.ok)throw new Error(n+' '+r.status);return r.arrayBuffer()}).then(b=>({name:n,b}))))
+.then(a=>{window.opener.postMessage({hz:a},'https://business.facebook.com');document.getElementById('s').textContent='sent '+a.length;setTimeout(()=>window.close(),800)})
+.catch(e=>{document.getElementById('s').textContent='error '+e.message;window.opener&&window.opener.postMessage({hzerr:String(e)},'https://business.facebook.com')});
+</script>
